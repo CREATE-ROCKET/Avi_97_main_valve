@@ -1,49 +1,68 @@
-// 1がmain,2がF/D
+// Main Valve Control
 #include <Arduino.h>
 #include <IcsHardSerialClass.h>
 #include "CANCREATE.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
 #define SERIAL_DEBUG
 
-#define SendingServoAngleId 0x401
-#define ReceivingServoAngleId 0x300
-#define ReceivingServoAngleRequestId 0x301
+#define CAN_ID_SEND_MAIN_VALVE_ANGLE 0x401
+#define CAN_ID_RECV_MAIN_VALVE_ANGLE 0x300
+#define CAN_ID_RECV_MAIN_VALVE_ANGLE_REQUEST 0x301
 #define ValveOpenId 0x10b
-#define RXFD 19
-#define TXFD 18
+#define RX_MAIN_VALVE 22
+#define TX_MAIN_VALVE 21
 #define LED 32
 #define EMG 16
 #define CAN_TX 15
 #define CAN_RX 13
-
+// 論理icは5V駆動
 constexpr byte EN_PIN = 17; // 基板21
 constexpr long BAUDRATE = 115200;
-constexpr int TIMEOUT = 1000;                                  // 通信できてないか確認用にわざと遅めに設定
-IcsHardSerialClass krs(&Serial2, EN_PIN, BAUDRATE, TIMEOUT);   // インスタンス＋ENピン(17番ピン)およびUARTの指定
+constexpr int TIMEOUT = 1000;                                // 通信できてないか確認用にわざと遅めに設定
+IcsHardSerialClass krs(&Serial2, EN_PIN, BAUDRATE, TIMEOUT); // インスタンス＋ENピン(17番ピン)およびUARTの指定
 
-float kakudo_o = 58;  // open 角度
-float kakudo_c = -77; // close 角度
-float kakudo_r = 0;   // recieve 角度
-int pos_o = kakudo_o * 8000 / 270 + 7000;
-int pos_c = kakudo_c * 8000 / 270 + 7000;
-int pos_r = 0;
-int maeposr = pos_r; /*以下でバウンス*/
-float currentPos = 0;
-float Pos = 0;
+float openAngle = 58;
+float closeAngle = -77;
+float targetAngle = 0;
+int openPosition = openAngle * 8000 / 270 + 7000;
+int closePosition = closeAngle * 8000 / 270 + 7000;
+int currentTargetPosition = 0;
+int lastSentPosition = currentTargetPosition;
+float currentPosition = 0;
+float currentAngle = 0;
+
+// Debounce variables
+unsigned long lastPositionChangeTime = 0;
+const unsigned long debounceDelay = 100; // 100ms
+int pendingTargetPosition = 0;
+
+enum SystemState
+{
+  NORMAL,
+  EMG_ACTIVE
+};
+SystemState currentState = NORMAL;
+
+SemaphoreHandle_t positionMutex;
 
 long count = 0;
 int count_EMG = 0;
-bool flag_EMG = 0;
 int count_free = 0;
 bool flag_free = 0;
 
 CAN_CREATE CAN(true);
+
+void canTask(void *pvParameters);
+
 void setup()
 {
   Serial.begin(115200);
   // 100 kbpsでCANを動作させる
   if (CAN.begin(100E3, CAN_RX, CAN_TX))
   {
-    Serial.println("Starting CAN failed!");
+    // Serial.println("Starting CAN failed!");
     while (1)
       ;
   }
@@ -51,30 +70,42 @@ void setup()
   pinMode(LED, OUTPUT);
   pinMode(EMG, INPUT);
   // サーボモータの通信初期設定
-  Serial2.begin(115200, SERIAL_8N1, RXFD, TXFD);
+  Serial2.begin(115200, SERIAL_8N1, RX_MAIN_VALVE, TX_MAIN_VALVE);
   krs.begin(); // サーボモータの通信初期設定
   digitalWrite(LED, HIGH);
   krs.setFree(0);
+  pendingTargetPosition = currentTargetPosition;
+
+  positionMutex = xSemaphoreCreateMutex();
+
+  xTaskCreateUniversal(
+      canTask,
+      "CAN_Task",
+      4096,
+      NULL,
+      1,
+      NULL,
+      0);
 }
 
 void getandsendPos()
 {
-  currentPos = krs.getPos(0);
-  Pos = (currentPos - 7000) / 8000 * 270;
+  currentPosition = krs.getPos(0);
+  currentAngle = (currentPosition - 7000) / 8000 * 270;
   uint8_t rdata[4];
-  rdata[0] = Pos;
-  rdata[1] = abs(kakudo_r);
+  rdata[0] = currentAngle;
+  rdata[1] = abs(targetAngle);
   rdata[2] = 16;
   rdata[3] = 13;
-  if (CAN.sendData(SendingServoAngleId, rdata, 4))
+  if (CAN.sendData(CAN_ID_SEND_MAIN_VALVE_ANGLE, rdata, 4))
   {
-    Serial.println("failed to send CAN data");
+    // Serial.println("failed to send CAN data");
   }
 }
 
-void loop()
+void canTask(void *pvParameters)
 {
-  if (!flag_EMG)
+  while (1)
   {
     if (CAN.available())
     {
@@ -83,10 +114,14 @@ void loop()
       {
         switch (message.id)
         {
-        case ReceivingServoAngleId:
-          kakudo_r = message.data[0] - 128;
-          pos_r = kakudo_r * 8000 / 270 + 7000;
-          if (kakudo_r > 64)
+        case CAN_ID_RECV_MAIN_VALVE_ANGLE:
+          xSemaphoreTake(positionMutex, portMAX_DELAY);
+          targetAngle = message.data[0] - 128; /*assume message.data[0] == 186*/
+          pendingTargetPosition = targetAngle * 8000 / 270 + 7000;
+          lastPositionChangeTime = millis();
+          xSemaphoreGive(positionMutex);
+
+          if (targetAngle > 64)
           {
             digitalWrite(LED, HIGH);
           }
@@ -94,28 +129,37 @@ void loop()
           {
             digitalWrite(LED, LOW);
           }
-          if (message.id == ReceivingServoAngleRequestId)
-          {
-          }
-          Serial.println("m");
           break;
-        case ReceivingServoAngleRequestId:
+        case CAN_ID_RECV_MAIN_VALVE_ANGLE_REQUEST:
           getandsendPos();
           break;
         case ValveOpenId:
-          krs.setPos(0, pos_r);
+          xSemaphoreTake(positionMutex, portMAX_DELAY);
+          krs.setPos(0, currentTargetPosition);
+          xSemaphoreGive(positionMutex);
           break;
         }
-        if (maeposr != pos_r)
-        {
-          krs.setPos(0, pos_r); // 位置指令 任意
-          maeposr = pos_r;
-          count_free = 0;
-          flag_free = 1;
-        }
-
       }
     }
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+  }
+}
+
+void loop()
+{
+  switch (currentState)
+  {
+  case NORMAL:
+    xSemaphoreTake(positionMutex, portMAX_DELAY);
+    if ((millis() - lastPositionChangeTime > debounceDelay) && (lastSentPosition != pendingTargetPosition))
+    {
+      currentTargetPosition = pendingTargetPosition;
+      krs.setPos(0, currentTargetPosition); // 位置指令 任意
+      lastSentPosition = currentTargetPosition;
+      count_free = 0;
+      flag_free = 1;
+    }
+    xSemaphoreGive(positionMutex);
 
     if (flag_free)
     {
@@ -131,7 +175,7 @@ void loop()
       count_EMG++;
       if (count_EMG > 3000) // ダンプ試験はここを変える
       {
-        flag_EMG = 1;
+        currentState = EMG_ACTIVE;
       }
     }
     else
@@ -143,15 +187,15 @@ void loop()
       getandsendPos();
     }
     digitalWrite(LED, digitalRead(LED) ^ 1);
-  }
-  else
-  {
+    break;
+  case EMG_ACTIVE:
     Serial.println("EMG detected, stopping servo.");
     if (digitalRead(EMG) == LOW)
     {
       count_EMG = 0;
-      flag_EMG = 0;
+      currentState = NORMAL;
     }
+    break;
   }
   ++count;
   delay(50);
@@ -161,20 +205,21 @@ void loop()
     int input = Serial.read();
     Serial.print("Input: ");
     Serial.println(input);
+
+    xSemaphoreTake(positionMutex, portMAX_DELAY);
     if (input == 'o')
     {
-      Serial.println("Open position selected");
-      Serial.println(krs.setPos(0, pos_o));
-      Serial.println(krs.getPos(0));
-      kakudo_r = kakudo_o;
-      maeposr = pos_o;
+      Serial.println("Open position requested");
+      pendingTargetPosition = openPosition;
+      lastPositionChangeTime = millis();
     }
     else if (input == 'c')
     {
-      krs.setPos(0, pos_c);
-      kakudo_r = kakudo_c;
-      maeposr = pos_c;
+      Serial.println("Close position requested");
+      pendingTargetPosition = closePosition;
+      lastPositionChangeTime = millis();
     }
+    xSemaphoreGive(positionMutex);
   }
   delay(10);
 #endif
