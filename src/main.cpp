@@ -11,23 +11,23 @@
 #define CAN_ID_RECV_MAIN_VALVE_ANGLE 0x300
 #define CAN_ID_RECV_MAIN_VALVE_ANGLE_REQUEST 0x301
 #define ValveOpenId 0x10b
-#define RX_MAIN_VALVE 22
-#define TX_MAIN_VALVE 21
-#define LED 32
-#define EMG 16
+#define RX_MAIN_VALVE 17
+#define TX_MAIN_VALVE 16
+#define LED 32 // s3にはない
+#define EMG 14
 #define CAN_TX 15
 #define CAN_RX 13
 // 論理icは5V駆動
-constexpr byte EN_PIN = 17; // 基板21
+constexpr byte EN_PIN = 12; // 基板21
 constexpr long BAUDRATE = 115200;
 constexpr int TIMEOUT = 1000;                                // 通信できてないか確認用にわざと遅めに設定
 IcsHardSerialClass krs(&Serial2, EN_PIN, BAUDRATE, TIMEOUT); // インスタンス＋ENピン(17番ピン)およびUARTの指定
 
-float openAngle = 58;
-float closeAngle = -77;
-float targetAngle = 0;
-int openPosition = openAngle * 8000 / 270 + 7000;
-int closePosition = closeAngle * 8000 / 270 + 7000;
+constexpr int openAngle = 58;
+constexpr int closeAngle = -77;
+constexpr int openPosition = openAngle * 8000 / 270 + 7000;
+constexpr int closePosition = closeAngle * 8000 / 270 + 7000;
+int targetAngle = 0;
 int currentTargetPosition = 0;
 int lastSentPosition = currentTargetPosition;
 float currentPosition = 0;
@@ -35,7 +35,7 @@ float currentAngle = 0;
 
 // Debounce variables
 unsigned long lastPositionChangeTime = 0;
-const unsigned long debounceDelay = 100; // 100ms
+constexpr unsigned long debounceDelay = 100; // 100ms
 int pendingTargetPosition = 0;
 
 enum SystemState
@@ -67,7 +67,7 @@ void setup()
       ;
   }
   Serial.println("I am a CAN sender");
-  pinMode(LED, OUTPUT);
+  // pinMode(LED, OUTPUT);
   pinMode(EMG, INPUT);
   // サーボモータの通信初期設定
   Serial2.begin(115200, SERIAL_8N1, RX_MAIN_VALVE, TX_MAIN_VALVE);
