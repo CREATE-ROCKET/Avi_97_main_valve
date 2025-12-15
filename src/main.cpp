@@ -11,8 +11,8 @@
 #define CAN_ID_RECV_MAIN_VALVE_ANGLE 0x300
 #define CAN_ID_RECV_MAIN_VALVE_ANGLE_REQUEST 0x301
 #define ValveOpenId 0x10b
-#define RX_MAIN_VALVE 17
-#define TX_MAIN_VALVE 16
+#define RX_MAIN_VALVE 22
+#define TX_MAIN_VALVE 21
 #define LED 32 // s3にはない
 #define EMG 14
 #define CAN_TX 15
@@ -23,7 +23,8 @@ constexpr long BAUDRATE = 115200;
 constexpr int TIMEOUT = 1000;                                // 通信できてないか確認用にわざと遅めに設定
 IcsHardSerialClass krs(&Serial2, EN_PIN, BAUDRATE, TIMEOUT); // インスタンス＋ENピン(17番ピン)およびUARTの指定
 
-constexpr int openAngle = 58;
+// 可動範囲は3500～11500
+constexpr int openAngle = 135;
 constexpr int closeAngle = -77;
 constexpr int openPosition = openAngle * 8000 / 270 + 7000;
 constexpr int closePosition = closeAngle * 8000 / 270 + 7000;
