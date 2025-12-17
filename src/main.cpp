@@ -7,10 +7,11 @@
 #include <freertos/semphr.h>
 #define SERIAL_DEBUG
 
-#define CAN_ID_SEND_MAIN_VALVE_ANGLE 0x401
-#define CAN_ID_RECV_MAIN_VALVE_ANGLE 0x300
-#define CAN_ID_RECV_MAIN_VALVE_ANGLE_REQUEST 0x301
+// --- CAN ID Definitions ---
+#define CAN_ID_SEND_MAIN_ANGLE_TO_CTRL_PANEL 0x102
+#define CAN_ID_RECV_MAIN_VALVE_ANGLE 0x105
 #define ValveOpenId 0x10b
+
 #define RX_MAIN_VALVE 22
 #define TX_MAIN_VALVE 21
 #define LED 32 // s3にはない
@@ -20,12 +21,12 @@
 // 論理icは5V駆動
 constexpr byte EN_PIN = 12; // 基板21
 constexpr long BAUDRATE = 115200;
-constexpr int TIMEOUT = 1000;                                // 通信できてないか確認用にわざと遅めに設定
+constexpr int TIMEOUT = 1000;                                // 通信できてないか確認用にわざと遅めに設定 (ms)
 IcsHardSerialClass krs(&Serial2, EN_PIN, BAUDRATE, TIMEOUT); // インスタンス＋ENピン(17番ピン)およびUARTの指定
 
 // 可動範囲は3500～11500
 constexpr int openAngle = 135;
-constexpr int closeAngle = -77;
+constexpr int closeAngle = -9;
 constexpr int openPosition = openAngle * 8000 / 270 + 7000;
 constexpr int closePosition = closeAngle * 8000 / 270 + 7000;
 int targetAngle = 0;
@@ -33,11 +34,9 @@ int currentTargetPosition = 0;
 int lastSentPosition = currentTargetPosition;
 float currentPosition = 0;
 float currentAngle = 0;
+int pendingTargetPosition = currentTargetPosition;
 
-// Debounce variables
-unsigned long lastPositionChangeTime = 0;
-constexpr unsigned long debounceDelay = 100; // 100ms
-int pendingTargetPosition = 0;
+
 
 enum SystemState
 {
@@ -75,7 +74,6 @@ void setup()
   krs.begin(); // サーボモータの通信初期設定
   digitalWrite(LED, HIGH);
   krs.setFree(0);
-  pendingTargetPosition = currentTargetPosition;
 
   positionMutex = xSemaphoreCreateMutex();
 
@@ -94,14 +92,8 @@ void getandsendPos()
   currentPosition = krs.getPos(0);
   currentAngle = (currentPosition - 7000) / 8000 * 270;
   uint8_t rdata[4];
-  rdata[0] = currentAngle;
-  rdata[1] = abs(targetAngle);
-  rdata[2] = 16;
-  rdata[3] = 13;
-  if (CAN.sendData(CAN_ID_SEND_MAIN_VALVE_ANGLE, rdata, 4))
-  {
-    // Serial.println("failed to send CAN data");
-  }
+  memcpy(rdata, &currentAngle, sizeof(float));
+  CAN.sendData(CAN_ID_SEND_MAIN_ANGLE_TO_CTRL_PANEL, rdata, 4);
 }
 
 void canTask(void *pvParameters)
@@ -117,26 +109,23 @@ void canTask(void *pvParameters)
         {
         case CAN_ID_RECV_MAIN_VALVE_ANGLE:
           xSemaphoreTake(positionMutex, portMAX_DELAY);
-          targetAngle = message.data[0] - 128; /*assume message.data[0] == 186*/
+          targetAngle = message.data[0] - 120; /*assume message.data[0] == 255(open) or 111(close) */
           pendingTargetPosition = targetAngle * 8000 / 270 + 7000;
-          lastPositionChangeTime = millis();
+
           xSemaphoreGive(positionMutex);
 
           if (targetAngle > 64)
           {
-            digitalWrite(LED, HIGH);
+            digitalWrite(LED, HIGH); // openrequest
           }
           else
           {
-            digitalWrite(LED, LOW);
+            digitalWrite(LED, LOW); // closerequest
           }
-          break;
-        case CAN_ID_RECV_MAIN_VALVE_ANGLE_REQUEST:
-          getandsendPos();
           break;
         case ValveOpenId:
           xSemaphoreTake(positionMutex, portMAX_DELAY);
-          krs.setPos(0, currentTargetPosition);
+          krs.setPos(0, openPosition);
           xSemaphoreGive(positionMutex);
           break;
         }
@@ -152,7 +141,7 @@ void loop()
   {
   case NORMAL:
     xSemaphoreTake(positionMutex, portMAX_DELAY);
-    if ((millis() - lastPositionChangeTime > debounceDelay) && (lastSentPosition != pendingTargetPosition))
+    if (lastSentPosition != pendingTargetPosition)
     {
       currentTargetPosition = pendingTargetPosition;
       krs.setPos(0, currentTargetPosition); // 位置指令 任意
@@ -199,7 +188,7 @@ void loop()
     break;
   }
   ++count;
-  delay(50);
+  delay(500);
 #ifdef SERIAL_DEBUG
   if (Serial.available())
   {
@@ -212,13 +201,13 @@ void loop()
     {
       Serial.println("Open position requested");
       pendingTargetPosition = openPosition;
-      lastPositionChangeTime = millis();
+
     }
     else if (input == 'c')
     {
       Serial.println("Close position requested");
       pendingTargetPosition = closePosition;
-      lastPositionChangeTime = millis();
+
     }
     xSemaphoreGive(positionMutex);
   }
