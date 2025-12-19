@@ -10,33 +10,32 @@
 // --- CAN ID Definitions ---
 #define CAN_ID_SEND_MAIN_ANGLE_TO_CTRL_PANEL 0x102
 #define CAN_ID_RECV_MAIN_VALVE_ANGLE 0x105
-#define ValveOpenId 0x10b
 
 #define RX_MAIN_VALVE 22
 #define TX_MAIN_VALVE 21
 #define LED 32 // s3にはない
+#define CAN_LED 4
 #define EMG 14
 #define CAN_TX 15
 #define CAN_RX 13
 // 論理icは5V駆動
-constexpr byte EN_PIN = 12; // 基板21
+constexpr byte EN_PIN = 18; // 基板21
 constexpr long BAUDRATE = 115200;
 constexpr int TIMEOUT = 1000;                                // 通信できてないか確認用にわざと遅めに設定 (ms)
 IcsHardSerialClass krs(&Serial2, EN_PIN, BAUDRATE, TIMEOUT); // インスタンス＋ENピン(17番ピン)およびUARTの指定
 
 // 可動範囲は3500～11500
-constexpr int openAngle = 135;
-constexpr int closeAngle = -9;
-constexpr int openPosition = openAngle * 8000 / 270 + 7000;
-constexpr int closePosition = closeAngle * 8000 / 270 + 7000;
+constexpr int openAngle = 135;                                // 118.125
+constexpr int closeAngle = -9;                                // -25.8525
+constexpr int openPosition = openAngle * 8000 / 270 + 7000;   // openAngle * 8000 / 270 + 7500 (11000)
+constexpr int closePosition = closeAngle * 8000 / 270 + 7000; // closeAngle * 8000 / 270 + 7500 (6734)
 int targetAngle = 0;
 int currentTargetPosition = 0;
 int lastSentPosition = currentTargetPosition;
 float currentPosition = 0;
 float currentAngle = 0;
 int pendingTargetPosition = currentTargetPosition;
-
-
+uint8_t led_counter = 0;
 
 enum SystemState
 {
@@ -67,22 +66,41 @@ void setup()
       ;
   }
   Serial.println("I am a CAN sender");
-  // pinMode(LED, OUTPUT);
+  pinMode(LED, OUTPUT);
+  pinMode(CAN_LED, OUTPUT);
   pinMode(EMG, INPUT);
   // サーボモータの通信初期設定
   Serial2.begin(115200, SERIAL_8N1, RX_MAIN_VALVE, TX_MAIN_VALVE);
   krs.begin(); // サーボモータの通信初期設定
   digitalWrite(LED, HIGH);
+  digitalWrite(CAN_LED, LOW);
   krs.setFree(0);
 
   positionMutex = xSemaphoreCreateMutex();
 
+  // switch (CAN.test())
+  // {
+  // case CAN_SUCCESS:
+  //   Serial.println("Success!!!");
+  //   break;
+  // case CAN_UNKNOWN_ERROR:
+  //   Serial.println("Unknown error occurred");
+  //   break;
+  // case CAN_NO_RESPONSE_ERROR:
+  //   Serial.println("No response error");
+  //   break;
+  // case CAN_CONTROLLER_ERROR:
+  //   Serial.println("CAN CONTROLLER ERROR");
+  //   break;
+  // default:
+  //   break;
+  // }
   xTaskCreateUniversal(
       canTask,
       "CAN_Task",
       4096,
       NULL,
-      1,
+      2,
       NULL,
       0);
 }
@@ -91,9 +109,8 @@ void getandsendPos()
 {
   currentPosition = krs.getPos(0);
   currentAngle = (currentPosition - 7000) / 8000 * 270;
-  uint8_t rdata[4];
-  memcpy(rdata, &currentAngle, sizeof(float));
-  CAN.sendData(CAN_ID_SEND_MAIN_ANGLE_TO_CTRL_PANEL, rdata, 4);
+  uint8_t rdata = static_cast<uint8_t>(currentAngle) + 120; // 135 -> 255, -9 -> 111
+  CAN.sendData(CAN_ID_SEND_MAIN_ANGLE_TO_CTRL_PANEL, &rdata, 1);
 }
 
 void canTask(void *pvParameters)
@@ -103,6 +120,21 @@ void canTask(void *pvParameters)
     if (CAN.available())
     {
       can_return_t message;
+      // 受信確認用のLチカ
+      if (led_counter > 254)
+      {
+        led_counter = 0;
+      }
+      if (led_counter % 2 == 0)
+      {
+        digitalWrite(CAN_LED, HIGH);
+      }
+      else
+      {
+        digitalWrite(CAN_LED, LOW);
+      }
+      ++led_counter;
+
       if (!CAN.readWithDetail(&message))
       {
         switch (message.id)
@@ -111,10 +143,9 @@ void canTask(void *pvParameters)
           xSemaphoreTake(positionMutex, portMAX_DELAY);
           targetAngle = message.data[0] - 120; /*assume message.data[0] == 255(open) or 111(close) */
           pendingTargetPosition = targetAngle * 8000 / 270 + 7000;
-
           xSemaphoreGive(positionMutex);
 
-          if (targetAngle > 64)
+          if (targetAngle > 0)
           {
             digitalWrite(LED, HIGH); // openrequest
           }
@@ -122,11 +153,6 @@ void canTask(void *pvParameters)
           {
             digitalWrite(LED, LOW); // closerequest
           }
-          break;
-        case ValveOpenId:
-          xSemaphoreTake(positionMutex, portMAX_DELAY);
-          krs.setPos(0, openPosition);
-          xSemaphoreGive(positionMutex);
           break;
         }
       }
@@ -144,21 +170,26 @@ void loop()
     if (lastSentPosition != pendingTargetPosition)
     {
       currentTargetPosition = pendingTargetPosition;
-      krs.setPos(0, currentTargetPosition); // 位置指令 任意
+      krs.setPos(0, currentTargetPosition);
       lastSentPosition = currentTargetPosition;
       count_free = 0;
       flag_free = 1;
     }
     xSemaphoreGive(positionMutex);
 
-    if (flag_free)
+    // if (flag_free)
+    // {
+    //   count_free++;
+    // }
+    // if (count_free > 1000)
+    // {
+    //   krs.setFree(0);
+    //   flag_free = 0;
+    // }
+    if (count > 150)
     {
-      count_free++;
-    }
-    if (count_free > 1000)
-    {
-      krs.setFree(0);
-      flag_free = 0;
+      count = 0;
+      getandsendPos();
     }
     if (digitalRead(EMG) == HIGH)
     {
@@ -172,23 +203,21 @@ void loop()
     {
       count_EMG = 0;
     }
-    if (count % 100 == 1)
-    {
-      getandsendPos();
-    }
     digitalWrite(LED, digitalRead(LED) ^ 1);
     break;
   case EMG_ACTIVE:
     Serial.println("EMG detected, stopping servo.");
     if (digitalRead(EMG) == LOW)
     {
+      krs.setPos(0, closePosition);
       count_EMG = 0;
       currentState = NORMAL;
     }
     break;
   }
+  getandsendPos();
   ++count;
-  delay(500);
+  delay(100);
 #ifdef SERIAL_DEBUG
   if (Serial.available())
   {
@@ -201,13 +230,16 @@ void loop()
     {
       Serial.println("Open position requested");
       pendingTargetPosition = openPosition;
-
     }
     else if (input == 'c')
     {
       Serial.println("Close position requested");
       pendingTargetPosition = closePosition;
-
+    }
+    else if (input == 'f')
+    {
+      Serial.println("Free requested");
+      krs.setFree(0);
     }
     xSemaphoreGive(positionMutex);
   }
