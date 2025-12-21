@@ -5,7 +5,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
-#define SERIAL_DEBUG
+// #define SERIAL_DEBUG
 
 // --- CAN ID Definitions ---
 #define CAN_ID_SEND_MAIN_ANGLE_TO_CTRL_PANEL 0x102
@@ -186,7 +186,7 @@ void loop()
     //   krs.setFree(0);
     //   flag_free = 0;
     // }
-    if (count > 150)
+    if (count > 50)
     {
       count = 0;
       getandsendPos();
